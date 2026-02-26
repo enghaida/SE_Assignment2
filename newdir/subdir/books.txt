@@ -1,0 +1,6 @@
+Algorithms:Thomas Cormen:9780262033848:6
+Clean Code:Robert Martin:9780132350884:3
+Data Structures:Mark Lee:9780201633610:2
+Java Programming:John Smith:9780134685991:5
+Operating Systems:Silberschatz:9780134658957:7
+Python Basics:Alice Brown:9781118008188:4

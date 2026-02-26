@@ -1,7 +1,6 @@
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.File;
-import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.time.LocalDateTime;
@@ -19,45 +18,48 @@ public class LibraryBookTracker {
 
     private static File errorLogFile = null;
 
+    // -------------------------------------------------------------------------
+    // Thread 1: reads the catalog file and populates the shared books list
+    // -------------------------------------------------------------------------
+    static class FileReader implements Runnable {
+        private final File catalogFile;
+        private final List<Book> books;
 
-    public static void main(String[] args) {
-        try {
-            //Validate argument count
-            if (args.length < 2) {
-                throw new InsufficientArgumentsException(
-                    "Insufficient arguments. Usage: java LibraryBookTracker <catalogFile.txt> <operation>");
+        FileReader(File catalogFile, List<Book> books) {
+            this.catalogFile = catalogFile;
+            this.books = books;
+        }
+
+        @Override
+        public void run() {
+            try {
+                readCatalog(catalogFile, books);
+            } catch (IOException e) {
+                errorCount++;
+                logError("IO ERROR: \"" + e.getMessage() + "\"", e);
+                System.err.println("File I/O Error: " + e.getMessage());
             }
+        }
+    }
 
-            //Validate catalog file name
-            if (!args[0].endsWith(".txt")) {
-                throw new InvalidFileNameException(
-                    "Catalog file must end with '.txt': " + args[0]);
-            }
+    // -------------------------------------------------------------------------
+    // Thread 2: processes the operation (args[1]) against the shared books list
+    // -------------------------------------------------------------------------
+    static class OperationAnalyzer implements Runnable {
+        private final List<Book> books;
+        private final String operation;
+        private final File catalogFile;
 
-            File catalogFile = new File(args[0]);
+        OperationAnalyzer(List<Book> books, String operation, File catalogFile) {
+            this.books = books;
+            this.operation = operation;
+            this.catalogFile = catalogFile;
+        }
 
-            //Create parent directories and/or the file if they do not exist
-            File parentDir = catalogFile.getParentFile();
-            if (parentDir != null && !parentDir.exists()) {
-                parentDir.mkdirs();
-            }
-            if (!catalogFile.exists()) {
-                catalogFile.createNewFile();
-            }
-
-            //Resolve errors.log path (same directory as the catalog)
-            errorLogFile = (parentDir != null)
-                ? new File(parentDir, "errors.log")
-                : new File("errors.log");
-
-            //Load catalog
-            List<Book> books = readCatalog(catalogFile);
-
-            //Determine operation from args[1]
-            String operation = args[1];
-
+        @Override
+        public void run() {
             if (operation.matches("\\d{13}")) {
-                //ISBN search
+                // ISBN search
                 try {
                     performISBNSearch(books, operation);
                 } catch (DuplicateISBNException e) {
@@ -68,7 +70,7 @@ public class LibraryBookTracker {
                 }
 
             } else if (operation.split(":", -1).length == 4) {
-                //Add book 
+                // Add book
                 try {
                     performAddBook(books, operation, catalogFile);
                 } catch (BookCatalogException e) {
@@ -76,12 +78,67 @@ public class LibraryBookTracker {
                     logError("INVALID INPUT: \"" + operation + "\"", e);
                     System.err.println("Error: " + e.getClass().getSimpleName()
                         + ": " + e.getMessage());
+                } catch (IOException e) {
+                    errorCount++;
+                    logError("IO ERROR: \"" + e.getMessage() + "\"", e);
+                    System.err.println("File I/O Error: " + e.getMessage());
                 }
 
             } else {
-                
+                // Keyword search
                 performKeywordSearch(books, operation);
             }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Main
+    // -------------------------------------------------------------------------
+    public static void main(String[] args) {
+        try {
+            // Validate argument count
+            if (args.length < 2) {
+                throw new InsufficientArgumentsException(
+                    "Insufficient arguments. Usage: java LibraryBookTracker <catalogFile.txt> <operation>");
+            }
+
+            // Validate catalog file name
+            if (!args[0].endsWith(".txt")) {
+                throw new InvalidFileNameException(
+                    "Catalog file must end with '.txt': " + args[0]);
+            }
+
+            File catalogFile = new File(args[0]);
+
+            // Create parent directories and/or the file if they do not exist
+            File parentDir = catalogFile.getParentFile();
+            if (parentDir != null && !parentDir.exists()) {
+                parentDir.mkdirs();
+            }
+            if (!catalogFile.exists()) {
+                catalogFile.createNewFile();
+            }
+
+            // Resolve errors.log path (same directory as the catalog)
+            errorLogFile = (parentDir != null)
+                ? new File(parentDir, "errors.log")
+                : new File("errors.log");
+
+            // Shared catalog list — both threads access this same instance
+            List<Book> books = new ArrayList<>();
+
+            // --- Thread 1: FileReader ---
+            // Reads the catalog file and populates the shared books list
+            Thread fileThread = new Thread(new FileReader(catalogFile, books));
+            fileThread.start();
+            fileThread.join(); // wait until Thread 1 finishes completely
+
+            // --- Thread 2: OperationAnalyzer ---
+            // Starts only after Thread 1 has finished; processes args[1]
+            String operation = args[1];
+            Thread opThread = new Thread(new OperationAnalyzer(books, operation, catalogFile));
+            opThread.start();
+            opThread.join(); // wait until Thread 2 finishes completely
 
         } catch (InsufficientArgumentsException e) {
             errorCount++;
@@ -96,6 +153,11 @@ public class LibraryBookTracker {
             errorCount++;
             logError("IO ERROR: \"" + e.getMessage() + "\"", e);
             System.err.println("File I/O Error: " + e.getMessage());
+        } catch (InterruptedException e) {
+            errorCount++;
+            logError("THREAD INTERRUPTED: \"" + e.getMessage() + "\"", e);
+            System.err.println("Thread interrupted: " + e.getMessage());
+            Thread.currentThread().interrupt();
         } catch (Exception e) {
             errorCount++;
             logError("UNEXPECTED ERROR: \"" + e.getMessage() + "\"", e);
@@ -112,14 +174,21 @@ public class LibraryBookTracker {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Helper methods (called by both Runnables via the enclosing class)
+    // -------------------------------------------------------------------------
+
     /**
      * Reads every line from the catalog file, attempts to parse and validate
-     * each one, skips invalid lines (logging them), and returns the list of
-     * valid Book objects.
+     * each one, skips invalid lines (logging them), and populates the provided
+     * books list.  Called from Thread 1 (FileReader).
+     *
+     * Note: java.io.FileReader is referenced with its fully-qualified name here
+     * to avoid ambiguity with the inner class also named FileReader.
      */
-    private static List<Book> readCatalog(File catalogFile) throws IOException {
-        List<Book> books = new ArrayList<>();
-        try (BufferedReader reader = new BufferedReader(new FileReader(catalogFile))) {
+    private static void readCatalog(File catalogFile, List<Book> books) throws IOException {
+        try (BufferedReader reader =
+                new BufferedReader(new java.io.FileReader(catalogFile))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 line = line.trim();
@@ -135,7 +204,6 @@ public class LibraryBookTracker {
                 }
             }
         }
-        return books;
     }
 
     /**
@@ -195,11 +263,9 @@ public class LibraryBookTracker {
         }
     }
 
-    
-
     /**
-     * Searche for books whose ISBN matches exactly
-     * throws DuplicateISBNException if more than one match exists
+     * Searches for books whose ISBN matches exactly;
+     * throws DuplicateISBNException if more than one match exists.
      */
     private static void performISBNSearch(List<Book> books, String isbn)
             throws DuplicateISBNException {
@@ -261,7 +327,6 @@ public class LibraryBookTracker {
         printBook(newBook);
     }
 
-
     private static void printHeader() {
         System.out.printf("%-30s %-20s %-15s %5s\n", "Title", "Author", "ISBN", "Copies");
         System.out.println("-".repeat(73));
@@ -273,7 +338,6 @@ public class LibraryBookTracker {
     }
 
     private static void logError(String context, Exception e) {
-      
         File target = (errorLogFile != null) ? errorLogFile : new File("errors.log");
 
         String timestamp = LocalDateTime.now()
